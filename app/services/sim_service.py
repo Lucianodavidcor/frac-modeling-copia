@@ -13,7 +13,7 @@ class SimulationService:
     def __init__(self, db: Session):
         self.db = db
         # Configuración de Stehfest (N=12 es estándar en industria)
-        self.STEHFEST_N = 16
+        self.STEHFEST_N = 12
         self.V = stehfest_weights(self.STEHFEST_N)
 
     def get_project_data(self, project_id: int):
@@ -57,11 +57,8 @@ class SimulationService:
             "omega": project.omega,
             "lam": project.lam
         }
-
-        # --- CORRECCIÓN DE UNIDADES ---
-        # Definimos el caudal unitario de referencia: q = 1 STB/d
-        # Convertimos a Sistema Internacional (m3/s) para que la matriz calcule Pascales reales
-        q_ref_m3s = 1.0 * STB_TO_M3 / DAY_TO_S  
+        q_target_stb = 150.0 
+        q_ref_m3s = q_target_stb * STB_TO_M3 / DAY_TO_S
 
         # Arrays para guardar resultados: [TimeSteps, WellIndex]
         results_dp = np.zeros((len(time_steps_days), n_wells))
