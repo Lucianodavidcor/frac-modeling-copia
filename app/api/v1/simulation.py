@@ -1,37 +1,47 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.db.session import get_db
+from typing import Any
+
+# Importamos la dependencia de base de datos.
+try:
+    from app.api.deps import get_db
+except ImportError:
+    from app.db.session import get_db
+
+# Importamos los esquemas y el servicio
+from app.schemas.sim_schemas import SimulationConfig, SimulationResponse
 from app.services.sim_service import SimulationService
-from app.schemas.sim_schemas import SimulationParams
 
 router = APIRouter()
 
-@router.post("/projects/{project_id}/simulate")
-def run_project_simulation(
-    project_id: int, 
-    params: SimulationParams,
+@router.post("/run", response_model=SimulationResponse, summary="Ejecutar Simulación Trilineal")
+def run_simulation(
+    config: SimulationConfig,
     db: Session = Depends(get_db)
-):
+) -> Any:
     """
-    Ejecuta la simulación de interferencia multi-pozo usando el motor de Laplace/Stehfest.
+    Ejecuta el motor matemático de interferencia (Modelo Trilineal Acoplado).
     
-    - **project_id**: ID del proyecto (Pad) creado previamente.
-    - **t_min/t_max**: Rango de tiempo en días.
-    - **n_steps**: Resolución de la curva (más pasos = más lento pero más suave).
+    Recibe los parámetros de configuración y devuelve las series de tiempo de presión
+    para cada pozo del proyecto.
     """
+    # Instanciamos el servicio con la sesión de DB actual
     service = SimulationService(db)
     
     try:
+        # Ejecutamos la lógica de negocio
         results = service.run_simulation(
-            project_id=project_id,
-            t_min=params.t_min,
-            t_max=params.t_max,
-            n_steps=params.n_steps
+            project_id=config.project_id,
+            t_min=config.t_min,
+            t_max=config.t_max,
+            n_steps=config.n_steps
         )
         return results
         
-    except HTTPException as e:
-        raise e
+    except HTTPException as he:
+        raise he
+    except ValueError as ve:
+        raise HTTPException(status_code=422, detail=f"Error de validación matemática: {str(ve)}")
     except Exception as e:
-        # Capturamos errores matemáticos inesperados (ej. división por cero en matriz mal formada)
-        raise HTTPException(status_code=500, detail=f"Error interno en el motor de simulación: {str(e)}")
+        print(f"CRITICAL ERROR in simulation: {e}") 
+        raise HTTPException(status_code=500, detail=f"Error interno del motor de simulación: {str(e)}")

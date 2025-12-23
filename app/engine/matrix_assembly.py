@@ -1,165 +1,131 @@
 import numpy as np
-import math
 import scipy.linalg
 from app.engine.dual_porosity import f_function
 
-# ================= Funciones Auxiliares de Estabilidad Numérica =================
-# Reciclado de physics.py
-
-def tanh_stable(x):
-    """Tangente hiperbólica numéricamente estable para argumentos complejos."""
-    # Evita overflow para partes reales grandes
-    if isinstance(x, complex):
-        if x.real > 20.0: return 1.0 + 0j
-        if x.real < -20.0: return -1.0 + 0j
-    else:
-        if x > 20.0: return 1.0
-        if x < -20.0: return -1.0
-    return np.tanh(x)
-
-def coth_stable(x):
-    """Cotangente hiperbólica estable (1/tanh)."""
-    # Evita división por cero
-    if abs(x) < 1e-12:
-        # Aproximación de Laurent: 1/x + x/3
-        return (1.0 / (x + 1e-20)) + (x / 3.0)
-    
-    t = tanh_stable(x)
-    if abs(t) < 1e-12:
-        return 1e12 # Número grande si tanh es muy chica
-    return 1.0 / t
-
-def exp_clamped(z, lim=700.0):
-    """Exponencial acotada para evitar overflow."""
-    if isinstance(z, complex):
-        real_part = np.clip(z.real, -lim, lim)
-        return np.exp(complex(real_part, z.imag))
-    return np.exp(np.clip(z, -lim, lim))
-
-
-class MultiWellMatrixSolver:
+class TrilinearMatrixSolver:
     def __init__(self, s_val: complex, num_wells: int):
         """
-        Inicializa el sistema matricial para un valor de Laplace 's'.
-        Args:
-            s_val: Valor de la variable de Laplace.
-            num_wells: Número de pozos (n).
+        Inicializa el sistema matricial para el Modelo Trilineal Acoplado.
+        Tamaño de Matriz: 2n x 2n (n ecuaciones de pozo + n ecuaciones de reservorio).
         """
         self.s = s_val
         self.n = num_wells
         
-        # Matriz de Interacción (R) de tamaño n x n
-        # R[i, j] representa la caída de presión en el pozo i causada por el pozo j
-        self.R = np.zeros((self.n, self.n), dtype=complex)
-        self.rhs = np.zeros(self.n, dtype=complex)
-
-    # ================= KERNELS FÍSICOS (Ecuaciones de Flujo) =================
-    # Implementación basada en physics.py y modelo trilineal (Ozkan/Brown)
-
-    def _lambda_trilinear(self, s, k, phi, mu, ct):
-        """Calcula el parámetro difusivo lambda = sqrt(s / eta)."""
-        # eta = k / (phi * mu * ct)
-        # lambda = sqrt( s * phi * mu * ct / k )
-        val = s * phi * mu * ct / (k + 1e-20)
-        return np.sqrt(val)
-
-    def _R_slab(self, s, lambda_val, k, h, L_dist):
-        """
-        Solución analítica para un bloque lineal (Slab).
-        Eq. base: (mu / k*h) * coth(lambda * L) / lambda
-        """
-        pre_factor = 1.0 / (k * h * lambda_val + 1e-20)
-        # Asumimos viscosidad incluida o normalizada en la permeabilidad efectiva
-        return pre_factor * coth_stable(lambda_val * L_dist)
-
-    def _R_semi_inf(self, s, lambda_val, k, h):
-        """
-        Solución para un medio semi-infinito.
-        Eq. base: (mu / k*h) * (1 / lambda)
-        """
-        return 1.0 / (k * h * lambda_val + 1e-20)
-
-    # ================= CONSTRUCCIÓN DE LA MATRIZ =================
-
-    def build_matrix(self, wells_params: list, project_params: dict):
-        """
-        Construye la matriz de interacción R paso a paso.
+        # El sistema es 2*n porque incluimos presiones de reservorio (SRV/ORV)
+        self.size = 2 * self.n
         
-        Args:
-            wells_params: Lista de dicts con datos adimensionales de cada pozo (output de adimensional.py).
-            project_params: Dict con datos físicos globales (mu, ct, h, k_ref, etc.).
+        self.A = np.zeros((self.size, self.size), dtype=complex)
+        self.b = np.zeros(self.size, dtype=complex)
+
+    def _calculate_coefficients(self, wells_params: list, project_params: dict, rates_dimless: np.ndarray = None) -> dict:
         """
-        # Extraemos constantes globales
-        mu = project_params["mu_pas"]   # Viscosidad [Pa.s]
-        ct = project_params["ct_pa"]    # Compresibilidad [1/Pa]
-        h = project_params["h_m"]       # Espesor [m]
-        # Nota: k_ref ya se usó para adimensionalizar, aquí usamos k local de cada bloque
-        
-        # Recorremos la matriz R elemento por elemento
+        Calcula coeficientes TRILINEALES. 
+        IMPORTANTE: 'rates_dimless' debe ser adimensional (ej. 1/s para caudal constante).
+        """
+        coeffs = {
+            'gamma_Fi': [], 'alpha_Fi': [], 'alpha_Oi': [],
+            'gamma_Oi_prev': [], 'gamma_Oi_next': [],
+            'r_i': [], 'tau_ii': [], 'tau_prev': [], 'tau_next': []
+        }
+
+        # Si no hay tasas definidas, asumimos 1.0 (Unitario)
+        if rates_dimless is None:
+            q_s_vec = np.ones(self.n, dtype=complex)
+        else:
+            q_s_vec = rates_dimless
+
         for i in range(self.n):
-            target_well = wells_params[i]
+            w = wells_params[i]
             
-            for j in range(self.n):
-                source_well = wells_params[j]
-                
-                # --- 1. Propiedades del Medio entre Pozos ---
-                # Usamos las propiedades del "Outer Reservoir" (Matriz Original) para la interferencia
-                # Si implementamos heterogeneidad, aquí elegiríamos k promedio
-                k_res = project_params["k_ref_m2"] 
-                phi_res = project_params["phi"]
-                
-                # Doble Porosidad Global
-                f_s = f_function(self.s, project_params.get("omega", 1), project_params.get("lam", 0))
-                
-                # Lambda efectivo considerando doble porosidad: s -> s * f(s)
-                s_eff = self.s * f_s
-                lam_res = self._lambda_trilinear(s_eff, k_res, phi_res, mu, ct)
+            # --- 1. Doble Porosidad ---
+            f_s = f_function(self.s, project_params.get("omega", 1), project_params.get("lam", 0))
+            u_res = self.s * f_s 
 
-                # --- 2. Cálculo de la Interacción R_ij ---
-                
-                dist_y = abs(target_well["y_D"] - source_well["y_D"]) * project_params["x_fr_ref_m"]
-                
-                if i == j:
-                    # DIAGONAL: Efecto del pozo sobre sí mismo (Self-Potential)
-                    # Modelo simplificado: Flujo lineal desde el borde del SRV hacia la fractura
-                    # R_ii = Resistencia SRV + Skin
-                    
-                    # Propiedades locales del SRV del pozo i
-                    # Nota: Para rigor completo, deberíamos usar k_srv específico si existe
-                    # Por ahora usamos el del reservorio para simplificar la primera versión
-                    
-                    # Usamos solución de slab (flujo lineal finito) hasta la distancia de interferencia media
-                    # O solución semi-infinita si están muy lejos
-                    val_R = self._R_semi_inf(s_eff, lam_res, k_res, h) * mu
-                    
-                    # Agregamos Skin (aditivo en Laplace)
-                    # Skin se define como caída de presión extra: dp_skin = S * q
-                    # Como R * q = dp, sumamos S a la resistencia
-                    # (Ajuste simplificado, el modelo riguroso de piel es más complejo)
-                    skin_term = 0.0 # Se puede implementar usando target_well['C_fD']
-                    
-                    self.R[i, j] = val_R + skin_term
-                    
-                else:
-                    # FUERA DE DIAGONAL: Interferencia (Cross-Potential)
-                    # Decaimiento exponencial de la presión con la distancia (Kernel 1D)
-                    # R_ij = R_source * exp(-lambda * distancia)
-                    
-                    base_R = self._R_semi_inf(s_eff, lam_res, k_res, h) * mu
-                    interferencia = exp_clamped(-lam_res * dist_y)
-                    
-                    self.R[i, j] = base_R * interferencia
+            # --- 2. Reservorio Externo (ORV) ---
+            eta_OiD = 1.0 
+            alpha_Oi = np.sqrt(u_res / eta_OiD)
+            coeffs['alpha_Oi'].append(alpha_Oi)
 
-    def solve_pressure(self, rates_laplace: np.ndarray) -> np.ndarray:
-        """
-        Caso Directo: Calculamos Presiones dados los Caudales.
-        p_vec = R * q_vec
-        """
-        return np.dot(self.R, rates_laplace)
+            # --- 3. SRV y Fractura ---
+            beta_Fi = 1.0 
+            C_fD = w["C_fD"]
+            eta_FiD = w["eta_D"]
+            
+            # alpha_Fi = sqrt( (2 * beta_Fi / C_fD) + (s / eta_FiD) )
+            term_alpha_f = (2 * beta_Fi / (C_fD + 1e-20)) + (self.s / eta_FiD)
+            alpha_Fi = np.sqrt(term_alpha_f)
+            coeffs['alpha_Fi'].append(alpha_Fi)
 
-    def solve_rates(self, delta_p_laplace: np.ndarray) -> np.ndarray:
+            # --- 4. Término de Fuente (r_i) ---
+            # Tangente hiperbólica estable
+            tanh_alpha = np.tanh(alpha_Fi) if alpha_Fi.real < 20 else 1.0
+            
+            # Denominador de la fuente trilineal
+            denom = (C_fD * alpha_Fi * tanh_alpha) + 1e-20
+            
+            # Cálculo final de r_i (Adimensional)
+            # r_i = (pi / denom) * q_D
+            val_r_i = (np.pi / denom) * q_s_vec[i]
+            
+            coeffs['r_i'].append(val_r_i)
+
+            # --- 5. Matriz ---
+            tanh_alpha_o = np.tanh(alpha_Oi) if alpha_Oi.real < 20 else 1.0
+            epsilon_i = tanh_alpha_o / (alpha_Oi + 1e-20)
+            coeffs['tau_ii'].append(epsilon_i)
+            coeffs['gamma_Fi'].append(1.0)
+
+            # --- 6. Interferencia ---
+            val_tau_prev = val_tau_next = 0.0
+            val_gamma_prev = val_gamma_next = 0.0
+
+            if i > 0:
+                dist = abs(w["y_D"] - wells_params[i-1]["y_D"])
+                coupling = np.exp(-alpha_Oi * dist)
+                val_tau_prev = val_gamma_prev = coupling
+
+            if i < self.n - 1:
+                dist = abs(w["y_D"] - wells_params[i+1]["y_D"])
+                coupling = np.exp(-alpha_Oi * dist)
+                val_tau_next = val_gamma_next = coupling
+
+            coeffs['tau_prev'].append(val_tau_prev)
+            coeffs['tau_next'].append(val_tau_next)
+            coeffs['gamma_Oi_prev'].append(val_gamma_prev)
+            coeffs['gamma_Oi_next'].append(val_gamma_next)
+
+        return coeffs
+
+    def build_matrix(self, wells_params: list, project_params: dict, rates_dimless: np.ndarray = None):
         """
-        Caso Inverso: Calculamos Caudales dadas las Caídas de Presión (Pressure Control).
-        q_vec = inv(R) * dp_vec
+        Ensambla A y b. Acepta rates_dimless para calcular b correctamente.
         """
-        return scipy.linalg.solve(self.R, delta_p_laplace)
+        coeffs = self._calculate_coefficients(wells_params, project_params, rates_dimless)
+        n = self.n
+        
+        for i in range(n):
+            # --- Bloque Pozo ---
+            self.A[i, i] = -1.0 
+            term_trans = coeffs['gamma_Fi'][i] * coeffs['tau_ii'][i]
+            self.A[i, i + n] = term_trans
+            
+            if i > 0: self.A[i, i - 1 + n] = coeffs['gamma_Oi_prev'][i] * term_trans
+            if i < n - 1: self.A[i, i + 1 + n] = coeffs['gamma_Oi_next'][i] * term_trans
+
+            self.b[i] = coeffs['r_i'][i]
+
+            # --- Bloque Roca ---
+            row = i + n
+            self.A[row, row] = -1.0 
+            self.A[row, i] = coeffs['tau_ii'][i]
+
+            if i > 0: self.A[row, row - 1] = coeffs['tau_prev'][i]
+            if i < n - 1: self.A[row, row + 1] = coeffs['tau_next'][i]
+                
+            self.b[row] = 0.0
+
+    def solve(self) -> np.ndarray:
+        try:
+            return np.linalg.solve(self.A, self.b)
+        except np.linalg.LinAlgError:
+            return np.zeros(self.size, dtype=complex)

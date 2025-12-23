@@ -26,10 +26,10 @@ class FractureHitViewerPro:
         # --- PANEL IZQUIERDO: CONFIGURACIÓN ---
         tk.Label(self.left_panel, text="1. Configuración de Pozos", font=("Arial", 11, "bold"), bg="#f4f4f4").pack(pady=(10,5))
         
-        # Input para IDs de Hijos (La solución "Sin Adivinar")
+        # Input para IDs de Hijos
         tk.Label(self.left_panel, text="IDs de Pozos Hijos (sep. por coma):", bg="#f4f4f4").pack(anchor="w", padx=5)
         self.ent_child_ids = tk.Entry(self.left_panel, width=30)
-        self.ent_child_ids.insert(0, "3") # Valor por defecto (tu caso actual)
+        self.ent_child_ids.insert(0, "8") # Valor por defecto actualizado a tu JSON (Infill Central es ID 8)
         self.ent_child_ids.pack(padx=5, pady=5)
 
         # --- PANEL IZQUIERDO: JSON ---
@@ -48,7 +48,7 @@ class FractureHitViewerPro:
         frame_zoom.pack(padx=5, fill=tk.X)
 
         # Entradas X e Y
-        labels = ["Día Inicial:", "Día Final:", "Presión Min (PSI):", "Presión Max (PSI):"]
+        labels = ["Día Inicial:", "Día Final:", "Presión Min:", "Presión Max:"]
         self.entries = {}
         for i, label in enumerate(labels):
             tk.Label(frame_zoom, text=label, bg="#f4f4f4").grid(row=i, column=0, sticky="w", pady=2)
@@ -92,81 +92,87 @@ class FractureHitViewerPro:
 
     def plot_graph(self, data):
         self.ax.clear()
+        
+        # Validar datos mínimos
+        if "time_days" not in data or "wells" not in data:
+            self.ax.text(0.5, 0.5, "JSON inválido: Faltan 'time_days' o 'wells'", ha='center', va='center')
+            self.canvas.draw()
+            return
+
         t_raw = np.array(data["time_days"])
         wells = data.get("wells", [])
-        colors = ['#1f77b4', '#2ca02c', '#9467bd', '#8c564b']
-        max_p = 0
+        colors = ['#1f77b4', '#2ca02c', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
         
-        # --- 1. LEER IDS DE HIJOS (MANUALMENTE) ---
+        # Variables para calcular límites globales
+        global_min_p = float('inf')
+        global_max_p = float('-inf')
+        has_data = False
+        
+        # --- 1. LEER IDS DE HIJOS ---
         try:
             child_ids_str = self.ent_child_ids.get()
             child_ids = [int(x.strip()) for x in child_ids_str.split(",") if x.strip()]
         except ValueError:
-            messagebox.showwarning("Aviso", "IDs de hijos inválidos. Se asumirá ninguno.")
             child_ids = []
 
+        # --- 2. BUCLE DE GRAFICADO ---
         for i, w in enumerate(wells):
             y_data = np.array(w.get("pressure_drop_psi", w.get("data", [])))
             well_id = w.get("well_id", -1)
+            name = w.get("name", f"Pozo {well_id}")
             
+            # Sincronizar longitudes (cortar al más corto por seguridad)
             min_len = min(len(t_raw), len(y_data))
+            if min_len == 0: continue
+            
             t_plot, y_plot = t_raw[:min_len], y_data[:min_len]
             
-            # --- 2. DETERMINAR SI ES HIJO POR ID ---
-            is_child = well_id in child_ids
+            # Actualizar límites globales
+            current_min = np.nanmin(y_plot)
+            current_max = np.nanmax(y_plot)
+            if current_min < global_min_p: global_min_p = current_min
+            if current_max > global_max_p: global_max_p = current_max
+            has_data = True
 
-            # --- 3. FILTRO DE LIMPIEZA INTELIGENTE ---
-            y_clean = np.copy(y_plot)
-            
-            # Calculamos el valor máximo de presión para este pozo
-            max_val = np.nanmax(y_plot) if len(y_plot) > 0 else 1.0
-            
-            # Umbral dinámico: El ruido suele ser despreciable comparado con la señal máxima.
-            # Usamos el 0.1% del máximo o 10 PSI, lo que sea mayor.
-            threshold = max(10.0, max_val * 0.001)
-            
-            # Filtramos todo lo que esté por debajo del umbral (elimina la línea plana inicial)
-            y_clean[y_clean <= threshold] = np.nan
-            
-            # Si es hijo, lógica extra para asegurar limpieza del evento de inicio
-            if is_child:
-                valid_indices = np.where(~np.isnan(y_clean))[0]
-                if len(valid_indices) > 0:
-                    first_idx = valid_indices[0]
-                    # Aseguramos que lo anterior sea NaN
-                    y_clean[:first_idx] = np.nan 
-                    
-                    # Dibujar línea vertical de inicio
-                    start_t = t_plot[first_idx]
-                    self.ax.axvline(x=start_t, color='gray', ls=':', alpha=0.5)
-            
-            # --- 4. GRAFICADO ---
+            # Estilo
+            is_child = well_id in child_ids
             color = 'red' if is_child else colors[i % len(colors)]
             style = '--' if is_child else '-'
-            label = f"{'HIJO' if is_child else 'PADRE'} ({well_id}): {w.get('name')}"
+            width = 2.5 if is_child else 1.5
+            label = f"{'[HIJO]' if is_child else '[PADRE]'} {name}"
             
-            if not np.all(np.isnan(y_clean)):
-                self.ax.semilogx(t_plot, y_clean, label=label, color=color, 
-                                 linestyle=style, linewidth=3 if is_child else 2, alpha=0.8)
-                
-                # Actualizar máximo para escala
-                valid_vals = y_clean[~np.isnan(y_clean)]
-                if len(valid_vals) > 0: 
-                    max_p = max(max_p, np.nanmax(valid_vals))
+            # Graficar SIN FILTROS DE RUIDO (Mostrar todo lo que devuelve el simulador)
+            self.ax.semilogx(t_plot, y_plot, label=label, color=color, 
+                             linestyle=style, linewidth=width, alpha=0.9)
 
-        # --- CONFIGURACIÓN FINAL ---
-        self.ax.invert_yaxis()
-        self.ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda x, p: format(int(x), ',')))
-        self.ax.xaxis.set_major_formatter(ticker.ScalarFormatter())
-        self.ax.set_title("Depleción del Reservorio: Análisis Parent-Child", fontsize=12, fontweight='bold')
-        self.ax.set_xlabel("Tiempo [Días]", fontweight='bold')
-        self.ax.set_ylabel("Caída de Presión [PSI]", fontweight='bold')
-        self.ax.grid(True, which="both", ls="-", alpha=0.3)
-        self.ax.legend(loc='best', shadow=True)
-
-        if max_p > 0:
-            self.default_ylim = (max_p * 1.1, 0)
+        # --- 3. CONFIGURACIÓN FINAL DEL EJE ---
+        if has_data:
+            # Margen del 5% para que no toque los bordes
+            margin = (global_max_p - global_min_p) * 0.05
+            if margin == 0: margin = 1.0
+            self.default_ylim = (global_min_p - margin, global_max_p + margin)
             self.ax.set_ylim(self.default_ylim)
+        else:
+            self.ax.text(0.5, 0.5, "Sin datos válidos para graficar", ha='center', va='center')
+
+        # Formateo
+        self.ax.set_title("Resultados de Simulación Trilineal (Caída de Presión)", fontsize=12, fontweight='bold')
+        self.ax.set_xlabel("Tiempo [Días]", fontweight='bold')
+        self.ax.set_ylabel("Delta P [PSI]", fontweight='bold')
+        
+        self.ax.grid(True, which="major", ls="-", alpha=0.5)
+        self.ax.grid(True, which="minor", ls=":", alpha=0.2)
+        
+        # Formateador Inteligente para el Eje Y (Maneja millones y negativos)
+        def format_y(x, pos):
+            if abs(x) >= 1e4 or (abs(x) < 1e-2 and x != 0):
+                return '{:.1e}'.format(x) # Notación científica para valores grandes/pequeños
+            return '{:,.0f}'.format(x) # Enteros con comas para rangos normales
+
+        self.ax.yaxis.set_major_formatter(ticker.FuncFormatter(format_y))
+        self.ax.xaxis.set_major_formatter(ticker.LogFormatterMathtext()) # Formato Log bonito para eje X
+        
+        self.ax.legend(loc='best', shadow=True, fontsize='small')
         
         self.default_xlim = self.ax.get_xlim()
         self.canvas.draw()
@@ -176,13 +182,20 @@ class FractureHitViewerPro:
         try:
             x_min = self.entries["Día Inicial:"].get()
             x_max = self.entries["Día Final:"].get()
-            y_min = self.entries["Presión Min (PSI):"].get()
-            y_max = self.entries["Presión Max (PSI):"].get()
+            y_min = self.entries["Presión Min:"].get()
+            y_max = self.entries["Presión Max:"].get()
 
-            if x_min and x_max: self.ax.set_xlim(left=float(x_min), right=float(x_max))
-            if y_min and y_max: self.ax.set_ylim(bottom=float(y_max), top=float(y_min))
+            # Validación básica
+            if x_min and x_max: 
+                self.ax.set_xlim(left=float(x_min), right=float(x_max))
+            
+            # Nota: Matplotlib usa (bottom, top). 
+            # Si el usuario quiere ver de -20 a 100, bottom=-20, top=100.
+            if y_min and y_max: 
+                self.ax.set_ylim(bottom=float(y_min), top=float(y_max))
+                
             self.canvas.draw()
-        except ValueError: messagebox.showerror("Error", "Ingrese números válidos.")
+        except ValueError: messagebox.showerror("Error", "Ingrese números válidos (Punto decimal .)")
 
     def reset_view(self):
         if not self.current_data: return
