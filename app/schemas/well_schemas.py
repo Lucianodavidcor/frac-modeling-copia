@@ -10,6 +10,7 @@ class WellBase(BaseModel):
     spacing_y: float = Field(..., description="Distancia relativa en Y [ft]", example=660.0)
     x_f: float = Field(..., description="Medio-ancho de fractura [ft]", gt=0)
     n_f: int = Field(..., description="Número de fracturas", gt=0)
+    r_w: float = Field(0.3, description="Radio del pozo [ft]", gt=0)
     t_0: float = Field(0.0, description="Tiempo de inicio de producción [días] (0 = Padre)", ge=0)
     conductivity: float = Field(..., description="Conductividad adimensional (C_fD)")
 

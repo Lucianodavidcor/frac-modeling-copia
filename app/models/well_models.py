@@ -35,6 +35,7 @@ class Well(Base):
     spacing_y = Column(Float) # Coordenada Y relativa (Espaciamiento)
     x_f = Column(Float)       # Longitud de media fractura
     n_f = Column(Integer)     # Número de fracturas
+    r_w = Column(Float, default=0.3) # Radio de pozo (ft)
     t_0 = Column(Float, default=0.0) # Tiempo de inicio (0=Padre, >0=Hijo)
     conductivity = Column(Float) # C_fD o conductividad de fractura
 

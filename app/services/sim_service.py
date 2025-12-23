@@ -11,11 +11,12 @@ from app.engine.matrix_assembly import MultiWellMatrixSolver
 class SimulationService:
     def __init__(self, db: Session):
         self.db = db
-        # N=12 es el estándar sugerido por el paper para el algoritmo de Stehfest [cite: 421]
+        # N=12 es el estándar sugerido por el paper para el algoritmo de Stehfest
         self.STEHFEST_N = 12
         self.V = stehfest_weights(self.STEHFEST_N)
 
     def get_project_data(self, project_id: int):
+        """Recupera el proyecto y sus pozos de la base de datos."""
         project = self.db.query(Project).filter(Project.id == project_id).first()
         if not project:
             raise HTTPException(status_code=404, detail="Proyecto no encontrado")
@@ -25,21 +26,20 @@ class SimulationService:
 
     def run_simulation(self, project_id: int, t_min: float = 1e-3, t_max: float = 1000.0, n_steps: int = 50):
         """
-        Ejecuta la simulación de interferencia multi-pozo usando el sistema 2n x 2n.
+        Ejecuta la simulación de interferencia multi-pozo usando el sistema acoplado 2n x 2n.
         """
-        # 1. Cargar datos y preparar el conversor adimensional [cite: 110]
+        # 1. Preparar datos y conversiones adimensionales
         project = self.get_project_data(project_id)
         wells = project.wells
         n_wells = len(wells)
         
-        # Grid log-espaciado para capturar transitorios de fractura y reservorio [cite: 453]
+        # Grid log-espaciado para capturar transitorios de fractura y reservorio
         time_steps_days = np.logspace(np.log10(t_min), np.log10(t_max), n_steps)
         
         converter = AdimConverter(project)
-        # Usamos la fractura del primer pozo como longitud de referencia (x_FR) [cite: 174]
+        # Usamos la fractura del primer pozo como longitud de referencia (x_FR)
         x_fr_ref = wells[0].x_f 
         
-        # Generar parámetros para cada pozo (incluye choking skin y eta_D) [cite: 208, 403]
         wells_params = [converter.get_well_params(w, x_fr_ref) for w in wells]
         
         proj_params = {
@@ -48,47 +48,58 @@ class SimulationService:
             "h_m": converter.h_m,
             "k_ref_m2": converter.k_ref_m2,
             "phi": converter.phi_ref,
-            "x_fr_ref_m": x_fr_ref * 0.3048, # ft a m
-            "omega": project.omega,
-            "lam": project.lam
+            "x_fr_ref_m": x_fr_ref * 0.3048 # ft a m
         }
 
-        # Resultados de caída de presión para cada pozo en cada tiempo
-        results_dp = np.zeros((len(time_steps_days), n_wells))
+        # --- Factor de Escala de Presión (Eq. 2 del Paper) ---
+        # Bajamos la tasa de referencia a 40 STB/D para evitar caídas de presión irreales en baja permeabilidad
+        q_target_stb = 40.0  
+        q_ref_m3s = q_target_stb * STB_TO_M3 / DAY_TO_S
+        
+        # Escala: DeltaP_real = p_D * (q * mu) / (2 * pi * k * h)
+        pressure_scale = (q_ref_m3s * converter.mu_pas) / (2 * math.pi * converter.k_ref_m2 * converter.h_m + 1e-20)
 
-        # ================= BUCLE PRINCIPAL DE TIEMPO (Stehfest) [cite: 418] =================
+        # Arrays para resultados
+        results_dp = np.zeros((len(time_steps_days), n_wells))
+        results_der = np.zeros((len(time_steps_days), n_wells))
+
+        # ================= BUCLE PRINCIPAL DE TIEMPO (Stehfest) =================
         for i, t_day in enumerate(time_steps_days):
             t_sec = t_day * DAY_TO_S
-            p_stehfest = np.zeros(n_wells, dtype=float)
+            p_sum = np.zeros(n_wells, dtype=float)
+            der_sum = np.zeros(n_wells, dtype=float)
             
-            # --- Inversión Numérica de Laplace ---
+            ln2 = math.log(2.0)
+            
             for k in range(1, self.STEHFEST_N + 1):
-                ln2 = math.log(2.0)
                 s_val = (k * ln2) / t_sec
                 
-                # Instanciar el solver matricial 2n x 2n del paper [cite: 383]
+                # Instanciar el solver matricial 2n x 2n
                 solver = MultiWellMatrixSolver(s_val, n_wells)
-                
-                # Construir el sistema (Matriz A y Vector b)
-                # El vector b ahora incorpora el término exp(-s * t_start) 
+                # build_matrix ya incluye q_D(s) y exp(-s*t_start) en el vector b
                 solver.build_matrix(wells_params, proj_params)
                 
-                # Resolver el sistema acoplado de interferencia 
-                # x = [p_w1D, ..., p_wnD, p_I1D_avg, ..., p_InD_avg]
-                p_wiD_vector = solver.solve()
+                # Obtener la presión de pozo acoplada en el espacio de Laplace
+                p_s = solver.solve()
                 
-                # Acumulación de la suma de Stehfest
-                weight = self.V[k-1]
-                p_stehfest += weight * p_wiD_vector.real
+                # Opcional: Wellbore Storage (Eq. 57)
+                for w_idx in range(n_wells):
+                    cd = wells_params[w_idx].get("C_D", 0.0)
+                    if cd > 0:
+                        p_s[w_idx] = p_s[w_idx] / (1.0 + cd * s_val * p_s[w_idx])
 
-            # Finalizar inversión para este paso de tiempo
-            # p(t) = (ln2 / t) * sum(V_k * p_s)
-            final_p_adim = (ln2 / t_sec) * p_stehfest
-            
-            # 2. Des-adimensionalización de la Presión [cite: 113]
-            # DeltaP = p_wiD * (q * B * mu) / (k * h)
-            # Como p_wiD ya escaló con q_ref en el b_vector, solo convertimos unidades
-            results_dp[i, :] = [field_p(val * (PSI_TO_PA / 1.0)) for val in final_p_adim]
+                # Acumulación ponderada
+                weight = self.V[k-1]
+                p_sum += weight * p_s.real
+                der_sum += weight * (s_val * p_s).real # Derivada logarítmica t*dp/dt
+
+            # 3. Finalizar inversión numérica
+            p_t_adim = (ln2 / t_sec) * p_sum
+            der_t_adim = (ln2 / t_sec) * der_sum
+
+            # Escalamiento a PSI (field_p convierte Pa -> PSI)
+            results_dp[i, :] = [field_p(val * pressure_scale) for val in p_t_adim]
+            results_der[i, :] = [field_p(val * pressure_scale) for val in der_t_adim]
 
         # ================= FORMATEO DE SALIDA =================
         output = {
@@ -100,7 +111,8 @@ class SimulationService:
             output["wells"].append({
                 "well_id": well.id,
                 "name": well.name,
-                "pressure_drop_psi": results_dp[:, w_idx].tolist()
+                "pressure_drop_psi": results_dp[:, w_idx].tolist(),
+                "derivative_psi": results_der[:, w_idx].tolist()
             })
             
         return output
