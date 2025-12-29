@@ -100,3 +100,19 @@ async def run_curve_simulation(
         "time_unit": "days",
         "data": curve_results
     }
+
+@router.post("/{project_id}/rate-curve")
+async def run_rate_simulation(project_id: int, total_days: int = 365, session: AsyncSession = Depends(get_session)):
+    result = await session.execute(select(Project).where(Project.id == project_id).options(selectinload(Project.wells)))
+    project = result.scalar_one_or_none()
+    
+    schedules_map = {}
+    for well in project.wells:
+        sched_res = await session.execute(select(ProductionSchedule).where(ProductionSchedule.well_id == well.id).order_by(ProductionSchedule.time_days))
+        schedules_map[well.id] = sched_res.scalars().all()
+
+    solver = TrilinearSolver(project, project.wells, schedules_map)
+    time_steps = list(range(1, total_days + 1, 5))
+    data = solver.calculate_rate_curve(time_steps)
+    
+    return {"project": project.name, "unit": "stb/d", "data": data}
