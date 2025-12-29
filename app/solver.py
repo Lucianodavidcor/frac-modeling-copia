@@ -54,7 +54,7 @@ class TrilinearSolver:
 
     def solve_laplace_rates(self, s, target_pwf_d_vector):
         """
-        Resuelve el sistema para obtener Tasas (q) dada una Presión (Pwf) impuesta.
+        Resuelve el sistema para obtener Tasas (q) dada una Pwf impuesta.
         q_D(s) = [A(s)]^-1 * Pwf_D(s)
         """
         A = np.zeros((self.n, self.n), dtype=complex)
@@ -66,10 +66,12 @@ class TrilinearSolver:
             cfd = (w.kf * w.wf) / (w.k_fi * w.xf)
             
             A[i, i] = 1.0 + (alpha_i / cfd)
+            # CORRECCIÓN DE SIGNO: En el modelo de tasa, la interferencia debe ser positiva
+            # para que al invertir la matriz, la tasa del vecino baje ante un nuevo pozo.
             if i > 0: 
-                A[i, i-1] = -0.2 / (w.spacing / self.L_ref)
+                A[i, i-1] = 0.2 / (w.spacing / self.L_ref)
             if i < self.n - 1:
-                A[i, i+1] = -0.2 / (self.wells[i+1].spacing / self.L_ref)
+                A[i, i+1] = 0.2 / (self.wells[i+1].spacing / self.L_ref)
         
         return solve(A, target_pwf_d_vector)
 
@@ -117,14 +119,12 @@ class TrilinearSolver:
 
     def calculate_rate_curve(self, days_list, n_stehfest=12):
         """
-        Versión Corregida: Calcula el DECLINO real (Tasa vs Tiempo).
+        Calcula el DECLINO real (Tasa vs Tiempo) con unidades y escala corregidas.
         """
         v = self._get_stehfest_coeffs(n_stehfest)
         results = {w.name: [] for w in self.wells}
         
-        # Escala física real para Vaca Muerta (STB/D)
-        # q = (k * h * DeltaP) / (141.2 * mu * B)
-        # Multiplicamos por un factor de ajuste para la adimensionalidad del modelo trilineal
+        # Escala física base para STB/D
         k_ref = self.wells[0].k_fi
         scale_base = (k_ref * self.p.h) / (141.2 * self.p.mu * self.p.b_factor)
 
@@ -136,25 +136,24 @@ class TrilinearSolver:
             for step in range(1, n_stehfest + 1):
                 s = step * ln2_t
                 
-                # Vector de presión adimensional (SIN el 1/s extra que causaba el aumento)
-                delta_p_vector = np.zeros(self.n, dtype=complex)
+                # Vector de presión en Laplace: DeltaP / s
+                pwfd_input = np.zeros(self.n, dtype=complex)
                 for i, well in enumerate(self.wells):
                     well_sched = self.schedules.get(well.id, [])
                     start_time = well_sched[0].time_days if well_sched else 0
                     target_pwf = well_sched[0].pwf_psi if well_sched else 1000.0
                     
                     if t_day >= start_time:
-                        # Delta P real en psi
-                        delta_p_vector[i] = (self.p.initial_pressure - target_pwf)
+                        delta_p = self.p.initial_pressure - target_pwf
+                        pwfd_input[i] = delta_p / s
                     else:
-                        delta_p_vector[i] = 0.0
+                        pwfd_input[i] = 0.0
                 
-                # Resolvemos el sistema: q_D = A^-1 * DeltaP
-                qd_vector += v[step - 1] * self.solve_laplace_rates(s, delta_p_vector)
+                qd_vector += v[step - 1] * self.solve_laplace_rates(s, pwfd_input)
             
             for i in range(self.n):
-                # Aplicamos la escala para obtener barriles por día reales
-                q_real = max(0, qd_vector[i].real * scale_base)
+                # Aplicamos el factor ln(2)/t de la inversión de Stehfest para tasas
+                q_real = max(0, qd_vector[i].real * scale_base * (np.log(2.0) / t_d))
                 results[self.wells[i].name].append(round(q_real, 2))
         
         return {"time": days_list, "curves": results}
