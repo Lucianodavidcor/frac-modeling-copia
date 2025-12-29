@@ -28,10 +28,10 @@ class TrilinearSolver:
             v[k-1] = ((-1)**(n2 + k)) * temp_v
         return v
 
-    def solve_laplace_unit_rate(self, s):
+    def solve_laplace_unit_rate(self, s, source_idx): # <-- Cambio: Agregamos source_idx
         """
-        Resuelve el sistema para una tasa adimensional unitaria (solución base).
-        Implementa el acoplamiento multi-pozo y flujo trilineal.
+        Resuelve el sistema para una tasa adimensional unitaria en UN pozo específico.
+        Esto permite desacoplar los efectos de cada pozo para la superposición.
         """
         A = np.zeros((self.n, self.n), dtype=complex)
         b = np.zeros(self.n, dtype=complex)
@@ -51,9 +51,9 @@ class TrilinearSolver:
                 A[i, i-1] = -0.2 / (w.spacing / self.L_ref)
             if i < self.n - 1: # Interferencia con pozo derecho
                 A[i, i+1] = -0.2 / (self.wells[i+1].spacing / self.L_ref)
-                
-            b[i] = 1.0 / s
-            
+        
+        # EL CAMBIO CLAVE: La tasa unitaria solo se aplica al pozo que está produciendo (source_idx)
+        b[source_idx] = 1.0 / s 
         return solve(A, b)
 
     def f_ki(self, s, omega, lambd):
@@ -69,17 +69,19 @@ class TrilinearSolver:
         Calcula el efecto acumulativo de cada cambio de tasa en el tiempo.
         """
         v = self._get_stehfest_coeffs(n_stehfest)
-        results = {w.name: [] for w in self.wells}
+        # Inicializamos los resultados con ceros para acumular las caídas de presión
+        results = {w.name: np.zeros(len(days_list)) for w in self.wells}
+        
         # Escalamiento físico real (DeltaP en psi)
         scale = (141.2 * self.p.mu * self.p.b_factor) / (self.wells[0].k_fi * self.p.h)
 
-        for t_day in days_list:
+        for i_day, t_day in enumerate(days_list):
             dp_total = np.zeros(self.n)
             
             # Aplicamos superposición para cada pozo productor
             for i_prod, well_prod in enumerate(self.wells):
                 well_sched = self.schedules.get(well_prod.id, [])
-                # Si no hay schedule, se usa una tasa base por defecto
+                # Si no hay schedule, se usa una tasa base por defecto de 200
                 q_steps = [(s.time_days, s.rate_stbd or 0.0) for s in well_sched] if well_sched else [(0.0, 200.0)]
                 
                 for k in range(len(q_steps)):
@@ -94,13 +96,18 @@ class TrilinearSolver:
                         pwd_vec = np.zeros(self.n)
                         for step in range(1, n_stehfest + 1):
                             s_laplace = step * np.log(2.0) / t_d
-                            pwd_vec += v[step-1] * self.solve_laplace_unit_rate(s_laplace).real
+                            # LLAMADA CORREGIDA: Pasamos el índice del pozo productor (i_prod)
+                            pwd_vec += v[step-1] * self.solve_laplace_unit_rate(s_laplace, i_prod).real
                         
                         dp_total += (delta_q * scale) * pwd_vec
 
-            # Guardar resultados finales (Pini - DeltaP acumulado)
+            # Guardar resultados finales (Pini - DeltaP acumulado) para cada pozo
             for i in range(self.n):
                 p_final = max(0, self.p.initial_pressure - dp_total[i])
-                results[self.wells[i].name].append(round(p_final, 2))
+                results[self.wells[i].name][i_day] = round(p_final, 2)
         
-        return {"time": days_list, "curves": results}
+        # Convertimos los arrays de numpy a listas para que sean JSON serializables
+        return {
+            "time": days_list, 
+            "curves": {name: curve.tolist() for name, curve in results.items()}
+        }
