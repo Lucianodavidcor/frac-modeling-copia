@@ -2,8 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_session
-from app.models import Project, Well
-from app.schemas import ProjectCreate, WellCreate
+from app.models import Project, Well, ProductionSchedule
+from app.schemas import ProjectCreate, WellCreate, ProductionScheduleCreate
 
 router = APIRouter(prefix="/projects", tags=["Ingeniería"])
 
@@ -25,3 +25,15 @@ async def add_well(project_id: int, data: WellCreate, session: AsyncSession = De
     await session.commit()
     await session.refresh(db_well)
     return db_well
+
+@router.post("/wells/{well_id}/schedules", response_model=ProductionSchedule)
+async def add_production_step(well_id: int, data: ProductionScheduleCreate, session: AsyncSession = Depends(get_session)):
+    """Agrega un cambio de tasa de producción para un pozo específico en un tiempo dado."""
+    db_well = await session.get(Well, well_id)
+    if not db_well:
+        raise HTTPException(status_code=404, detail="Pozo no encontrado")
+    db_schedule = ProductionSchedule(**data.model_dump(), well_id=well_id)
+    session.add(db_schedule)
+    await session.commit()
+    await session.refresh(db_schedule)
+    return db_schedule
