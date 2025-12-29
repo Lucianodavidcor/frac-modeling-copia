@@ -28,88 +28,9 @@ class TrilinearSolver:
             v[k-1] = ((-1)**(n2 + k)) * temp_v
         return v
 
-    def solve_laplace_rates(self, s, delta_p_vector):
-        """
-        Resuelve el sistema de tasas con acoplamiento dinámico transitorio.
-        q_D(s) = [A(s)]^-1 * (DeltaP / s)
-        """
-        A = np.zeros((self.n, self.n), dtype=complex)
-        for i in range(self.n):
-            w = self.wells[i]
-            
-            # Difusividad adimensional relativa al SRV (más estable para declino en Vaca Muerta)
-            eta_di = 1.0 
-            u_i = (s / eta_di) * self.f_ki(s, 0.1, 1e-6)
-            alpha_i = np.sqrt(u_i)
-            
-            # CfD: Conductividad de fractura adimensional
-            cfd = (w.kf * w.wf) / (w.k_fi * w.xf)
-            
-            # Diagonal: Resistencia total (Fractura + Reservorio)
-            # El uso de tanh representa el límite físico del drenaje lateral (Eq. 35)
-            A[i, i] = 1.0 + (alpha_i / (cfd * np.tanh(max(1e-8, alpha_i))))
-            
-            # Interferencia lateral dinámica: el efecto disminuye con la distancia y el tiempo (s)
-            coupling = 0.2 * np.exp(-np.sqrt(s) * (w.spacing / self.L_ref))
-            if i > 0: 
-                A[i, i-1] = coupling
-            if i < self.n - 1:
-                A[i, i+1] = coupling
-        
-        return solve(A, delta_p_vector / s)
-
-    def f_ki(self, s, omega, lambd):
-        """Función de transferencia de doble porosidad (Eq. 30)."""
-        if lambd == 0 or (1 - omega) == 0: 
-            return 1.0
-        arg = np.sqrt(max(1e-12, (3.0 * (1.0 - omega) * s) / lambd))
-        return omega + np.sqrt((lambd * (1.0 - omega)) / (3.0 * s)) * np.tanh(arg)
-
-    def calculate_rate_curve(self, days_list, n_stehfest=12):
-        """
-        Calcula el declino de tasa real (STB/D) usando el SRV como referencia de tiempo.
-        """
-        v = self._get_stehfest_coeffs(n_stehfest)
-        results = {w.name: [] for w in self.wells}
-        
-        # Escala física basada en la zona estimulada (SRV)
-        k_ref = self.wells[0].k_fi
-        scale_q = (k_ref * self.p.h) / (141.2 * self.p.mu * self.p.b_factor)
-
-        for t_day in days_list:
-            # t_d basado en k_fi para capturar el declino transitorio real
-            t_d = (0.00633 * k_ref * t_day) / (self.wells[0].phi_fi * self.p.mu * self.wells[0].ct_fi * (self.L_ref**2))
-            
-            if t_d <= 0:
-                for w in self.wells: results[w.name].append(0.0)
-                continue
-
-            ln2_td = np.log(2.0) / t_d
-            qd_sum = np.zeros(self.n, dtype=complex)
-            
-            for step in range(1, n_stehfest + 1):
-                s = step * ln2_td
-                
-                delta_p_vec = np.zeros(self.n)
-                for i, well in enumerate(self.wells):
-                    well_sched = self.schedules.get(well.id, [])
-                    start_time = well_sched[0].time_days if well_sched else 0
-                    if t_day >= start_time:
-                        target_pwf = well_sched[0].pwf_psi if well_sched else 1000.0
-                        delta_p_vec[i] = self.p.initial_pressure - target_pwf
-                
-                qd_sum += v[step - 1] * self.solve_laplace_rates(s, delta_p_vec)
-            
-            for i in range(self.n):
-                # Aplicamos el factor (ln 2 / t_d) de la inversión de Stehfest para tasas
-                q_final = max(0, qd_sum[i].real * scale_q * (np.log(2.0) / t_d))
-                results[self.wells[i].name].append(round(q_final, 2))
-        
-        return {"time": days_list, "curves": results}
-
     def solve_laplace_unit_rate(self, s, source_idx):
         """
-        Resuelve el sistema para una tasa adimensional unitaria.
+        Resuelve el sistema para una tasa adimensional unitaria (Solución Base).
         Se usa para la superposición de presión.
         """
         A = np.zeros((self.n, self.n), dtype=complex)
@@ -117,29 +38,61 @@ class TrilinearSolver:
         
         for i in range(self.n):
             w = self.wells[i]
-            eta_di = (w.k_fi / (w.phi_fi * w.ct_fi)) / (self.p.k_mo / (self.p.phi_mo * self.p.ct_mo))
+            # Usamos k_fi para mayor estabilidad en el declino transitorio
+            eta_di = 1.0 
             u_i = (s / eta_di) * self.f_ki(s, 0.1, 1e-6)
             alpha_i = np.sqrt(u_i)
             cfd = (w.kf * w.wf) / (w.k_fi * w.xf)
             
-            A[i, i] = 1.0 + (alpha_i / cfd)
-            if i > 0: 
-                A[i, i-1] = -0.2 / (w.spacing / self.L_ref)
-            if i < self.n - 1:
-                A[i, i+1] = -0.2 / (self.wells[i+1].spacing / self.L_ref)
+            # Diagonal con límite de drenaje lateral (tanh)
+            A[i, i] = 1.0 + (alpha_i / (cfd * np.tanh(max(1e-8, alpha_i))))
+            
+            # Interferencia lateral dinámica (acoplamiento de presión)
+            coupling = 0.15 * np.exp(-np.sqrt(s) * (w.spacing / self.L_ref))
+            if i > 0: A[i, i-1] = -coupling
+            if i < self.n - 1: A[i, i+1] = -coupling
         
+        # En Laplace, tasa constante unitaria es 1/s
         b[source_idx] = 1.0 / s 
         return solve(A, b)
 
+    def solve_laplace_rates(self, s, delta_p_vector):
+        """
+        Resuelve el sistema para obtener Tasas (q) con acoplamiento competitivo.
+        """
+        A = np.zeros((self.n, self.n), dtype=complex)
+        for i in range(self.n):
+            w = self.wells[i]
+            eta_di = 1.0 
+            u_i = (s / eta_di) * self.f_ki(s, 0.1, 1e-6)
+            alpha_i = np.sqrt(u_i)
+            cfd = (w.kf * w.wf) / (w.k_fi * w.xf)
+            
+            A[i, i] = 1.0 + (alpha_i / (cfd * np.tanh(max(1e-8, alpha_i))))
+            
+            coupling = 0.2 * np.exp(-np.sqrt(s) * (w.spacing / self.L_ref))
+            if i > 0: A[i, i-1] = coupling
+            if i < self.n - 1: A[i, i+1] = coupling
+        
+        return solve(A, delta_p_vector / s)
+
+    def f_ki(self, s, omega, lambd):
+        """Función de transferencia de doble porosidad (Eq. 30)."""
+        if lambd == 0 or (1 - omega) == 0: return 1.0
+        arg = np.sqrt(max(1e-12, (3.0 * (1.0 - omega) * s) / lambd))
+        return omega + np.sqrt((lambd * (1.0 - omega)) / (3.0 * s)) * np.tanh(arg)
+
     def calculate_curve(self, days_list, n_stehfest=12):
-        """Genera curvas de presión aplicando superposición temporal."""
+        """
+        Genera curvas de presión aplicando superposición temporal real (STB/D -> psi).
+        """
         v = self._get_stehfest_coeffs(n_stehfest)
         results = {w.name: np.zeros(len(days_list)) for w in self.wells}
-        scale = (141.2 * self.p.mu * self.p.b_factor) / (self.wells[0].k_fi * self.p.h)
+        k_ref = self.wells[0].k_fi
+        scale = (141.2 * self.p.mu * self.p.b_factor) / (k_ref * self.p.h)
 
         for i_day, t_day in enumerate(days_list):
             dp_total = np.zeros(self.n)
-            
             for i_prod, well_prod in enumerate(self.wells):
                 well_sched = self.schedules.get(well_prod.id, [])
                 q_steps = [(s.time_days, s.rate_stbd or 0.0) for s in well_sched] if well_sched else [(0.0, 200.0)]
@@ -151,16 +104,53 @@ class TrilinearSolver:
                         delta_q = q_val - q_prev
                         dt = t_day - t_start
                         
-                        # Inversión de Stehfest local para el delta de tiempo dt
-                        t_d_local = (0.00633 * self.wells[0].k_fi * dt) / (self.wells[0].phi_fi * self.p.mu * self.wells[0].ct_fi * (self.L_ref**2))
-                        pwd_vec = np.zeros(self.n)
-                        for step in range(1, n_stehfest + 1):
-                            s_lap = step * np.log(2.0) / t_d_local
-                            pwd_vec += v[step-1] * self.solve_laplace_unit_rate(s_lap, i_prod).real
+                        t_d_local = (0.00633 * k_ref * dt) / (self.wells[0].phi_fi * self.p.mu * self.wells[0].ct_fi * (self.L_ref**2))
+                        if t_d_local <= 0: continue
                         
-                        dp_total += (delta_q * scale) * pwd_vec
+                        ln2_td = np.log(2.0) / t_d_local
+                        pwd_vec_sum = np.zeros(self.n, dtype=complex)
+                        for step in range(1, n_stehfest + 1):
+                            s_lap = step * ln2_td
+                            pwd_vec_sum += v[step-1] * self.solve_laplace_unit_rate(s_lap, i_prod)
+                        
+                        # CORRECCIÓN: Se añade el factor ln(2)/t_d para la inversión correcta de presión
+                        dp_total += (delta_q * scale) * (pwd_vec_sum.real * ln2_td)
 
             for i in range(self.n):
                 results[self.wells[i].name][i_day] = round(max(0, self.p.initial_pressure - dp_total[i]), 2)
         
         return {"time": days_list, "curves": {name: curve.tolist() for name, curve in results.items()}}
+
+    def calculate_rate_curve(self, days_list, n_stehfest=12):
+        """Calcula el declino de tasa real (STB/D) usando Pwf constante."""
+        v = self._get_stehfest_coeffs(n_stehfest)
+        results = {w.name: [] for w in self.wells}
+        k_ref = self.wells[0].k_fi
+        scale_q = (k_ref * self.p.h) / (141.2 * self.p.mu * self.p.b_factor)
+
+        for t_day in days_list:
+            t_d = (0.00633 * k_ref * t_day) / (self.wells[0].phi_fi * self.p.mu * self.wells[0].ct_fi * (self.L_ref**2))
+            if t_d <= 0:
+                for w in self.wells: results[w.name].append(0.0)
+                continue
+
+            ln2_td = np.log(2.0) / t_d
+            qd_sum = np.zeros(self.n, dtype=complex)
+            for step in range(1, n_stehfest + 1):
+                s = step * ln2_td
+                delta_p_vec = np.zeros(self.n)
+                for i, well in enumerate(self.wells):
+                    well_sched = self.schedules.get(well.id, [])
+                    start_time = well_sched[0].time_days if well_sched else 0
+                    if t_day >= start_time:
+                        target_pwf = well_sched[0].pwf_psi if well_sched else 1000.0
+                        delta_p_vec[i] = self.p.initial_pressure - target_pwf
+                
+                qd_sum += v[step - 1] * self.solve_laplace_rates(s, delta_p_vec)
+            
+            for i in range(self.n):
+                # Factor ln(2)/t para la inversión de tasa
+                q_final = max(0, qd_sum[i].real * scale_q * ln2_td)
+                results[self.wells[i].name].append(round(q_final, 2))
+        
+        return {"time": days_list, "curves": results}
