@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from app.database import init_db
-from app.routes import project
+from app.routes import project, simulation
 
 app = FastAPI(
     title="Reservoir Multi-Well API (SPE-215031-PA)",
@@ -12,8 +12,8 @@ app = FastAPI(
 async def on_startup():
     await init_db()
 
-# Incluimos las nuevas rutas de ingeniería
 app.include_router(project.router)
+app.include_router(simulation.router)
 
 @app.get("/health", tags=["Infraestructura"])
 async def health_check():
