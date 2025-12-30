@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 
 # CONFIGURACIÓN: Apuntamos al endpoint de CURVA DE PRESIÓN
 API_URL = "http://127.0.0.1:8000/simulate/1/curve" 
-PARAMS = {"total_days": 365, "step_days": 5} # step_days=5 para mayor suavidad en los cambios
+PARAMS = {"total_days": 1800, "step_days": 15} # step_days=5 para mayor suavidad en los cambios
 
 def plot_pressure_data():
     print(f"Solicitando curvas de presión a la API: {API_URL}...")
