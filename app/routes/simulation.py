@@ -6,6 +6,10 @@ from app.database import get_session
 from app.models import Project, Well, ProductionSchedule
 from app.solver import TrilinearSolver
 
+import pandas as pd
+import io
+from fastapi.responses import StreamingResponse
+
 router = APIRouter(prefix="/simulate", tags=["Cálculo"])
 
 @router.post("/{project_id}")
@@ -116,3 +120,62 @@ async def run_rate_simulation(project_id: int, total_days: int = 365, session: A
     data = solver.calculate_rate_curve(time_steps)
     
     return {"project": project.name, "unit": "stb/d", "data": data}
+
+@router.get("/{project_id}/export-excel")
+async def export_simulation_to_excel(project_id: int, session: AsyncSession = Depends(get_session)):
+    """
+    Genera un archivo Excel con los resultados completos de la simulación
+    (Presiones y Tasas) en pestañas separadas.
+    """
+    # 1. Obtener datos básicos
+    result = await session.execute(
+        select(Project).where(Project.id == project_id).options(selectinload(Project.wells))
+    )
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+
+    schedules_map = {}
+    for well in project.wells:
+        sched_res = await session.execute(
+            select(ProductionSchedule).where(ProductionSchedule.well_id == well.id)
+        )
+        schedules_map[well.id] = sched_res.scalars().all()
+
+    # 2. Ejecutar simulaciones
+    solver = TrilinearSolver(project, project.wells, schedules_map)
+    time_steps = list(range(1, 366, 5))
+    
+    pressure_data = solver.calculate_curve(time_steps)
+    rate_data = solver.calculate_rate_curve(time_steps)
+
+    # 3. Crear DataFrames de Pandas
+    df_pressures = pd.DataFrame(pressure_data["curves"])
+    df_pressures.insert(0, "Tiempo (Días)", pressure_data["time"])
+
+    df_rates = pd.DataFrame(rate_data["curves"])
+    df_rates.insert(0, "Tiempo (Días)", rate_data["time"])
+
+    # 4. Escribir a un buffer de memoria (BytesIO)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df_pressures.to_sheet_name = "Presiones (psi)"
+        df_pressures.to_excel(writer, sheet_name="Presiones_psi", index=False)
+        df_rates.to_excel(writer, sheet_name="Tasas_STBD", index=False)
+        
+        # Opcional: Una pestaña con los parámetros del proyecto
+        params = {
+            "Proyecto": project.name,
+            "Presión Inicial (psi)": project.initial_pressure,
+            "Espesor (ft)": project.h,
+            "Viscosidad (cp)": project.mu
+        }
+        pd.DataFrame([params]).to_excel(writer, sheet_name="Metadatos", index=False)
+
+    output.seek(0)
+    
+    # 5. Retornar el archivo para descarga directa
+    headers = {
+        'Content-Disposition': f'attachment; filename="Simulacion_{project.name.replace(" ", "_")}.xlsx"'
+    }
+    return StreamingResponse(output, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
