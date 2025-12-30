@@ -122,19 +122,27 @@ async def run_rate_simulation(project_id: int, total_days: int = 365, session: A
     return {"project": project.name, "unit": "stb/d", "data": data}
 
 @router.get("/{project_id}/export-excel")
-async def export_simulation_to_excel(project_id: int, session: AsyncSession = Depends(get_session)):
+async def export_simulation_to_excel(
+    project_id: int, 
+    total_days: int = Query(1800, description="Días totales de la simulación (ej. 1800 para 5 años)"),
+    step_days: int = Query(10, description="Frecuencia de pasos en días"),
+    session: AsyncSession = Depends(get_session)
+):
     """
-    Genera un archivo Excel con los resultados completos de la simulación
-    (Presiones y Tasas) en pestañas separadas.
+    Genera un Excel con tiempos extendidos y parámetros definibles por el usuario.
     """
-    # 1. Obtener datos básicos
+    # 1. Obtener proyecto y pozos
     result = await session.execute(
-        select(Project).where(Project.id == project_id).options(selectinload(Project.wells))
+        select(Project)
+        .where(Project.id == project_id)
+        .options(selectinload(Project.wells))
     )
     project = result.scalar_one_or_none()
+    
     if not project:
         raise HTTPException(status_code=404, detail="Proyecto no encontrado")
 
+    # 2. Cargar cronogramas para superposición
     schedules_map = {}
     for well in project.wells:
         sched_res = await session.execute(
@@ -142,40 +150,41 @@ async def export_simulation_to_excel(project_id: int, session: AsyncSession = De
         )
         schedules_map[well.id] = sched_res.scalars().all()
 
-    # 2. Ejecutar simulaciones
-    solver = TrilinearSolver(project, project.wells, schedules_map)
-    time_steps = list(range(1, 366, 5))
+    # 3. Configurar el rango de tiempo solicitado
+    time_steps = list(range(1, total_days + 1, step_days))
     
+    # 4. Ejecutar el Solver
+    solver = TrilinearSolver(project, project.wells, schedules_map)
     pressure_data = solver.calculate_curve(time_steps)
     rate_data = solver.calculate_rate_curve(time_steps)
 
-    # 3. Crear DataFrames de Pandas
+    # 5. Crear DataFrames
     df_pressures = pd.DataFrame(pressure_data["curves"])
     df_pressures.insert(0, "Tiempo (Días)", pressure_data["time"])
 
     df_rates = pd.DataFrame(rate_data["curves"])
     df_rates.insert(0, "Tiempo (Días)", rate_data["time"])
 
-    # 4. Escribir a un buffer de memoria (BytesIO)
+    # 6. Preparar el archivo Excel en memoria
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df_pressures.to_sheet_name = "Presiones (psi)"
         df_pressures.to_excel(writer, sheet_name="Presiones_psi", index=False)
         df_rates.to_excel(writer, sheet_name="Tasas_STBD", index=False)
         
-        # Opcional: Una pestaña con los parámetros del proyecto
-        params = {
+        # Pestaña de configuración para registro
+        config_df = pd.DataFrame([{
             "Proyecto": project.name,
-            "Presión Inicial (psi)": project.initial_pressure,
-            "Espesor (ft)": project.h,
-            "Viscosidad (cp)": project.mu
-        }
-        pd.DataFrame([params]).to_excel(writer, sheet_name="Metadatos", index=False)
+            "Días Simulados": total_days,
+            "Intervalo": step_days,
+            "P_inicial (psi)": project.initial_pressure
+        }])
+        config_df.to_excel(writer, sheet_name="Configuracion", index=False)
 
     output.seek(0)
     
-    # 5. Retornar el archivo para descarga directa
-    headers = {
-        'Content-Disposition': f'attachment; filename="Simulacion_{project.name.replace(" ", "_")}.xlsx"'
-    }
-    return StreamingResponse(output, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    filename = f"Reporte_{project.name.replace(' ', '_')}_{total_days}dias.xlsx"
+    return StreamingResponse(
+        output, 
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
