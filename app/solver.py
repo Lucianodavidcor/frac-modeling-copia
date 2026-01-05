@@ -90,7 +90,7 @@ class TrilinearSolver:
             dp_total = np.zeros(self.n)
             for i_prod, well_prod in enumerate(self.wells):
                 well_sched = self.schedules.get(well_prod.id, [])
-                # CAMBIO: Si no hay schedule, la lista está vacía (no produce)
+                # Si no hay schedule, la lista está vacía (no produce)
                 q_steps = [(s.time_days, s.rate_stbd or 0.0) for s in well_sched]
                 
                 for k in range(len(q_steps)):
@@ -138,7 +138,7 @@ class TrilinearSolver:
                 delta_p_vec = np.zeros(self.n)
                 for i, well in enumerate(self.wells):
                     well_sched = self.schedules.get(well.id, [])
-                    # CAMBIO: Si no hay cronograma, DeltaP es 0 (no produce)
+                    # Si no hay cronograma, DeltaP es 0 (no produce)
                     if not well_sched:
                         delta_p_vec[i] = 0.0
                         continue
