@@ -55,16 +55,18 @@ async def run_simulation(project_id: int, session: AsyncSession = Depends(get_se
         "unit": "psi"
     }
 
+
 @router.post("/{project_id}/curve")
 async def run_curve_simulation(
-    project_id: int, 
-    total_days: int = Query(365, description="Días totales a simular"),
-    step_days: int = Query(5, description="Intervalo entre puntos para la curva"),
-    session: AsyncSession = Depends(get_session)
+        project_id: int,
+        total_days: int = Query(365, description="Días totales a simular"),
+        step_days: int = Query(5, description="Intervalo entre puntos (solo si log_scale=False)"),
+        log_scale: bool = Query(False, description="Si es True, usa pasos logarítmicos para verificación Log-Log"),
+        session: AsyncSession = Depends(get_session)
 ):
     """
-    Genera una curva de presión vs tiempo aplicando superposición basada en los cronogramas reales.
-    Retorna arrays de datos listos para graficar en el visualizador.
+    Genera una curva de presión, delta P y derivada vs tiempo.
+    Soporta escala logarítmica para validación contra el paper SPE-215031-PA.
     """
     # 1. Obtener proyecto y cargar sus pozos asociados
     result = await session.execute(
@@ -73,12 +75,11 @@ async def run_curve_simulation(
         .options(selectinload(Project.wells))
     )
     project = result.scalar_one_or_none()
-    
+
     if not project or not project.wells:
         raise HTTPException(status_code=404, detail="Proyecto o pozos no encontrados")
 
     # 2. Cargar los cronogramas (ProductionSchedules) para cada pozo
-    # Esto es vital para que el solver aplique la superposición de tasas variables
     schedules_map = {}
     for well in project.wells:
         sched_res = await session.execute(
@@ -89,19 +90,28 @@ async def run_curve_simulation(
         schedules_map[well.id] = sched_res.scalars().all()
 
     # 3. Configurar pasos de tiempo para la curva
-    time_steps = list(range(1, total_days + 1, step_days))
-    
+    if log_scale:
+        # Generamos 50 puntos desde 1e-5 hasta total_days para capturar el almacenamiento (Wellbore Storage)
+        import numpy as np
+        # Usamos base 10 para el espaciamiento logarítmico
+        time_steps = np.logspace(-5, np.log10(total_days), 50).tolist()
+    else:
+        # Escala lineal estándar para monitoreo diario
+        time_steps = list(range(1, total_days + 1, step_days))
+
     # 4. Ejecutar el Solver con la historia de producción real
     solver = TrilinearSolver(project, project.wells, schedules_map)
     try:
+        # El solver ahora devuelve pwf, delta_p y derivative
         curve_results = solver.calculate_curve(time_steps)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en la simulación de curva: {str(e)}")
-    
+        raise HTTPException(status_code=500, detail=f"Error en la simulación: {str(e)}")
+
     return {
         "project": project.name,
         "unit": "psi",
         "time_unit": "days",
+        "is_log_scale": log_scale,
         "data": curve_results
     }
 
