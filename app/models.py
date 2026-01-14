@@ -59,6 +59,7 @@ class Well(SQLModel, table=True):
     xf: float = Field(description="HF Half-length (ft)")
     wf: float = Field(description="HF width (ft)")
     kf: float = Field(description="HF permeability (md)")
+    c_wellbore: float = Field(default=0.0, description="Wellbore storage (bbl/psi)")
 
     # Relaciones
     project: Project = Relationship(back_populates="wells")

@@ -26,6 +26,7 @@ class WellCreate(BaseModel):
     xf: float
     wf: float
     kf: float
+    c_wellbore: Optional[float] = Field(0.0, description="Wellbore storage (bbl/psi)")
 
 class ProjectCreate(BaseModel):
     name: str

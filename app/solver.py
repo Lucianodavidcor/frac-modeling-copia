@@ -79,38 +79,62 @@ class TrilinearSolver:
 
     def calculate_curve(self, days_list, n_stehfest=12):
         """
-        Genera curvas de presión. Si no hay cronograma, el pozo no produce (DP=0).
+        Genera curvas de presión incluyendo el efecto de Wellbore Storage (C).
+        Si no hay cronograma, el pozo no produce (DP=0).
         """
         v = self._get_stehfest_coeffs(n_stehfest)
         results = {w.name: np.zeros(len(days_list)) for w in self.wells}
+        
+        # Usamos propiedades del primer pozo como referencia global para el escalamiento
         k_ref = self.wells[0].k_fi
         scale = (141.2 * self.p.mu * self.p.b_factor) / (k_ref * self.p.h)
 
         for i_day, t_day in enumerate(days_list):
             dp_total = np.zeros(self.n)
+            
             for i_prod, well_prod in enumerate(self.wells):
                 well_sched = self.schedules.get(well_prod.id, [])
-                # Si no hay schedule, la lista está vacía (no produce)
+                # Lista de cambios de tasa (tiempo, tasa)
                 q_steps = [(s.time_days, s.rate_stbd or 0.0) for s in well_sched]
                 
+                # --- Cálculo de CD (Almacenamiento Adimensional) ---
+                # C_D = 0.8936 * C / (phi * ct * h * L_ref^2)
+                phi_ref = well_prod.phi_fi
+                ct_ref = well_prod.ct_fi
+                c_d = (0.8936 * getattr(well_prod, 'c_wellbore', 0.0)) / (phi_ref * ct_ref * self.p.h * (self.L_ref**2))
+
                 for k in range(len(q_steps)):
                     t_start, q_val = q_steps[k]
+                    
                     if t_day > t_start:
                         q_prev = q_steps[k-1][1] if k > 0 else 0.0
                         delta_q = q_val - q_prev
                         dt = t_day - t_start
                         
-                        t_d_local = (0.00633 * k_ref * dt) / (self.wells[0].phi_fi * self.p.mu * self.wells[0].ct_fi * (self.L_ref**2))
+                        # Tiempo adimensional local para este paso de tiempo
+                        t_d_local = (0.00633 * k_ref * dt) / (phi_ref * self.p.mu * ct_ref * (self.L_ref**2))
                         if t_d_local <= 0: continue
                         
                         ln2_td = np.log(2.0) / t_d_local
                         pwd_vec_sum = np.zeros(self.n, dtype=complex)
+                        
                         for step in range(1, n_stehfest + 1):
                             s_lap = step * ln2_td
-                            pwd_vec_sum += v[step-1] * self.solve_laplace_unit_rate(s_lap, i_prod)
+                            # Solución base (tasa unitaria) en Laplace
+                            sol_lap = self.solve_laplace_unit_rate(s_lap, i_prod)
+                            
+                            # --- Aplicar Corrección de Wellbore Storage ---
+                            # La presión en el pozo con almacenamiento se acopla mediante sol_lap / (1 + CD * s^2 * sol_lap)
+                            if c_d > 0:
+                                # El efecto de almacenamiento afecta principalmente al pozo que está produciendo (source_idx)
+                                sol_lap[i_prod] = sol_lap[i_prod] / (1.0 + c_d * (s_lap**2) * sol_lap[i_prod])
+                            
+                            pwd_vec_sum += v[step-1] * sol_lap
                         
+                        # Superposición del delta_q multiplicado por la solución invertida
                         dp_total += (delta_q * scale) * (pwd_vec_sum.real * ln2_td)
 
+            # Guardar resultados finales restando la caída total de la presión inicial
             for i in range(self.n):
                 results[self.wells[i].name][i_day] = round(max(0, self.p.initial_pressure - dp_total[i]), 2)
         
