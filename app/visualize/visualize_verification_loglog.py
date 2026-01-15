@@ -13,7 +13,7 @@ API_URL = f"http://127.0.0.1:8000/simulate/{PROJECT_ID}/curve"
 def plot_verification_final():
     # Parámetros para replicar exactamente el rango del paper
     params = {
-        "total_days": 100000,
+        "total_days": 10000,
         "log_scale": True  # Vital para obtener resolución desde 10^-5 días
     }
 

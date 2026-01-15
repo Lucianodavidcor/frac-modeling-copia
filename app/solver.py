@@ -68,7 +68,7 @@ class TrilinearSolver:
         results = {w.name: {"pwf": [], "delta_p": [], "derivative": []} for w in self.wells}
 
         k_ref = self.wells[0].k_fi
-        scale = (4.064 * self.p.mu * self.p.b_factor) / (k_ref * self.p.h)
+        scale = (141.2 * self.p.mu * self.p.b_factor) / (k_ref * self.p.h)
 
         temp_pwf = {w.name: [] for w in self.wells}
 

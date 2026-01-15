@@ -7,7 +7,7 @@ API_URL = f"http://127.0.0.1:8000/simulate/{PROJECT_ID}/curve"
 
 
 def plot_fig8_replica():
-    params = {"total_days": 10000, "log_scale": True}
+    params = {"total_days": 100000, "log_scale": True}
 
     try:
         response = requests.post(API_URL, params=params)
@@ -45,7 +45,7 @@ def plot_fig8_replica():
         plt.grid(True, which="both", linestyle='--', alpha=0.5)
         plt.legend(loc='lower right', frameon=True, shadow=True, fontsize=10)
 
-        plt.tight_layout()  # Asegura que nada se corte
+        plt.tight_layout()
         plt.savefig("verificacion_multiwell_final.png", dpi=300)
         plt.show()
 
