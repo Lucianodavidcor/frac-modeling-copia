@@ -12,48 +12,48 @@ from fastapi.responses import StreamingResponse
 
 router = APIRouter(prefix="/simulate", tags=["Cálculo"])
 
-@router.post("/{project_id}")
-async def run_simulation(project_id: int, session: AsyncSession = Depends(get_session)):
-    """
-    Calcula la presión en los pozos para un punto fijo de 30 días.
-    Útil para verificaciones rápidas de interferencia inicial.
-    """
-    # 1. Obtener datos del proyecto
-    result = await session.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
-    
-    # 2. Obtener pozos asociados ordenados por ID
-    result_wells = await session.execute(
-        select(Well).where(Well.project_id == project_id).order_by(Well.id)
-    )
-    wells = result_wells.scalars().all()
-    
-    if not wells:
-        raise HTTPException(status_code=400, detail="El proyecto no tiene pozos")
-
-    # 3. Ejecutar el Solver
-    solver = TrilinearSolver(project, wells)
-    t_interes = 30.0
-    
-    try:
-        pressures = solver.stehfest_inversion(t_interes)
-    except Exception as e:
-        # Capturamos errores numéricos
-        raise HTTPException(status_code=500, detail=f"Error en el cálculo numérico: {str(e)}")
-    
-    # 4. Formatear respuesta
-    well_results = {}
-    for i, p_val in enumerate(pressures):
-        well_results[wells[i].name] = p_val
-
-    return {
-        "project": project.name,
-        "days": t_interes,
-        "results": well_results,
-        "unit": "psi"
-    }
+# @router.post("/{project_id}")
+# async def run_simulation(project_id: int, session: AsyncSession = Depends(get_session)):
+#     """
+#     Calcula la presión en los pozos para un punto fijo de 30 días.
+#     Útil para verificaciones rápidas de interferencia inicial.
+#     """
+#     # 1. Obtener datos del proyecto
+#     result = await session.execute(select(Project).where(Project.id == project_id))
+#     project = result.scalar_one_or_none()
+#     if not project:
+#         raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+#
+#     # 2. Obtener pozos asociados ordenados por ID
+#     result_wells = await session.execute(
+#         select(Well).where(Well.project_id == project_id).order_by(Well.id)
+#     )
+#     wells = result_wells.scalars().all()
+#
+#     if not wells:
+#         raise HTTPException(status_code=400, detail="El proyecto no tiene pozos")
+#
+#     # 3. Ejecutar el Solver
+#     solver = TrilinearSolver(project, wells)
+#     t_interes = 30.0
+#
+#     try:
+#         pressures = solver.stehfest_inversion(t_interes)
+#     except Exception as e:
+#         # Capturamos errores numéricos
+#         raise HTTPException(status_code=500, detail=f"Error en el cálculo numérico: {str(e)}")
+#
+#     # 4. Formatear respuesta
+#     well_results = {}
+#     for i, p_val in enumerate(pressures):
+#         well_results[wells[i].name] = p_val
+#
+#     return {
+#         "project": project.name,
+#         "days": t_interes,
+#         "results": well_results,
+#         "unit": "psi"
+#     }
 
 
 @router.post("/{project_id}/curve")
@@ -102,7 +102,7 @@ async def run_curve_simulation(
     # 4. Ejecutar el Solver con la historia de producción real
     solver = TrilinearSolver(project, project.wells, schedules_map)
     try:
-        # El solver ahora devuelve pwf, delta_p y derivative
+        # El solver devuelve pwf, delta_p y derivative
         curve_results = solver.calculate_curve(time_steps)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error en la simulación: {str(e)}")
@@ -115,21 +115,21 @@ async def run_curve_simulation(
         "data": curve_results
     }
 
-@router.post("/{project_id}/rate-curve")
-async def run_rate_simulation(project_id: int, total_days: int = 365, session: AsyncSession = Depends(get_session)):
-    result = await session.execute(select(Project).where(Project.id == project_id).options(selectinload(Project.wells)))
-    project = result.scalar_one_or_none()
-    
-    schedules_map = {}
-    for well in project.wells:
-        sched_res = await session.execute(select(ProductionSchedule).where(ProductionSchedule.well_id == well.id).order_by(ProductionSchedule.time_days))
-        schedules_map[well.id] = sched_res.scalars().all()
-
-    solver = TrilinearSolver(project, project.wells, schedules_map)
-    time_steps = list(range(1, total_days + 1, 5))
-    data = solver.calculate_rate_curve(time_steps)
-    
-    return {"project": project.name, "unit": "stb/d", "data": data}
+# @router.post("/{project_id}/rate-curve")
+# async def run_rate_simulation(project_id: int, total_days: int = 365, session: AsyncSession = Depends(get_session)):
+#     result = await session.execute(select(Project).where(Project.id == project_id).options(selectinload(Project.wells)))
+#     project = result.scalar_one_or_none()
+#
+#     schedules_map = {}
+#     for well in project.wells:
+#         sched_res = await session.execute(select(ProductionSchedule).where(ProductionSchedule.well_id == well.id).order_by(ProductionSchedule.time_days))
+#         schedules_map[well.id] = sched_res.scalars().all()
+#
+#     solver = TrilinearSolver(project, project.wells, schedules_map)
+#     time_steps = list(range(1, total_days + 1, 5))
+#     data = solver.calculate_rate_curve(time_steps)
+#
+#     return {"project": project.name, "unit": "stb/d", "data": data}
 
 @router.get("/{project_id}/export-excel")
 async def export_simulation_to_excel(

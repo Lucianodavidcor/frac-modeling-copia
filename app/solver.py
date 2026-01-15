@@ -41,7 +41,7 @@ class TrilinearSolver:
         alpha_i = np.sqrt(u_i)
         cfd = (w_prod.kf * w_prod.wf) / max(1e-10, (w_prod.k_fi * w_prod.xf))
 
-        # --- FÓRMULA TRILINEAL CORRECTA (EJEMPLO 1) ---
+        # --- FÓRMULA TRILINEAL (EJEMPLO 1) ---
         # psi vincula la fractura con el reservorio
         psi = np.sqrt((2.0 / cfd) * alpha_i * np.tanh(max(1e-8, alpha_i)))
 
