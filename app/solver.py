@@ -27,41 +27,31 @@ class TrilinearSolver:
         return v
 
     def solve_laplace_unit_rate(self, s, source_idx):
-        """
-        Calcula la presión adimensional (PwD) usando el acoplamiento trilineal
-        completo entre el SRV y la fractura hidráulica.
-        """
         A = np.eye(self.n, dtype=complex)
         b = np.zeros(self.n, dtype=complex)
 
         w_prod = self.wells[source_idx]
 
-        # Parámetros de doble porosidad dinámicos
+        # Parámetros dinámicos de la DB
         omega = (w_prod.phi_fi * w_prod.ct_fi) / max(1e-10,
                                                      (w_prod.phi_fi * w_prod.ct_fi + w_prod.phi_mi * w_prod.ct_mi))
         lambd = (w_prod.sigma_i * w_prod.k_mi * (self.L_ref ** 2)) / max(1e-10, w_prod.k_fi)
 
-        # Flujo desde el SRV hacia la fractura (alpha)
         u_i = s * self.f_ki(s, omega, lambd)
         alpha_i = np.sqrt(u_i)
-
-        # Conductividad de fractura (Cfd)
         cfd = (w_prod.kf * w_prod.wf) / max(1e-10, (w_prod.k_fi * w_prod.xf))
 
-        # ACoplamiento Trilineal (psi): Acopla el flujo del SRV con la HF
-        # Esta es la clave para que la presión tenga la magnitud correcta (psi)
+        # --- FÓRMULA TRILINEAL CORRECTA (EJEMPLO 1) ---
+        # psi vincula la fractura con el reservorio
         psi = np.sqrt((2.0 / cfd) * alpha_i * np.tanh(max(1e-8, alpha_i)))
 
-        # SOLUCIÓN ANALÍTICA: Presión en el pozo (Self-response)
-        # Genera la pendiente 0.5 (flujo lineal) de la Fig. 8
-        pwd_self = np.pi / (2.0 * s * cfd * psi * np.tanh(max(1e-8, psi)))
+        # La solución debe ser PwD = pi / (s * Cfd * psi * tanh(psi))
+        pwd_self = np.pi / (s * cfd * psi * np.tanh(max(1e-8, psi)))
         b[source_idx] = pwd_self
 
-        # INTERFERENCIA: Propagación de presión a otros pozos
         for j in range(self.n):
             if j == source_idx: continue
             dist_d = abs(self.wells[j].spacing * (j - source_idx)) / self.L_ref
-            # La interferencia depende de la difusividad de la roca (alpha_i)
             b[j] = pwd_self * np.exp(-alpha_i * dist_d)
 
         return solve(A, b)
@@ -78,7 +68,7 @@ class TrilinearSolver:
         results = {w.name: {"pwf": [], "delta_p": [], "derivative": []} for w in self.wells}
 
         k_ref = self.wells[0].k_fi
-        scale = (141.2 * self.p.mu * self.p.b_factor) / (k_ref * self.p.h)
+        scale = (4.064 * self.p.mu * self.p.b_factor) / (k_ref * self.p.h)
 
         temp_pwf = {w.name: [] for w in self.wells}
 
